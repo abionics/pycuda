@@ -37,6 +37,7 @@
 #include <boost/thread/thread.hpp>
 #include <boost/thread/tss.hpp>
 #include <boost/version.hpp>
+#include <numpy/arrayobject.h>
 
 #if (BOOST_VERSION/100) < 1035
 #warning *****************************************************************
@@ -1441,8 +1442,9 @@ namespace pycuda
 
 #if CUDAPP_CUDA_VERSION >= 4000
       void launch_kernel(py::tuple grid_dim_py, py::tuple block_dim_py,
-          py::object parameter_buffer,
-          unsigned shared_mem_bytes, py::object stream_py)
+          py::object call_args,
+          unsigned shared_mem_bytes, py::object stream_py,
+          bool cooperative=false)
       {
         const unsigned axis_count = 3;
         unsigned grid_dim[axis_count];
@@ -1472,22 +1474,135 @@ namespace pycuda
 
         PYCUDA_PARSE_STREAM_PY;
 
-        py_buffer_wrapper par_buf_wrapper;
-        par_buf_wrapper.get(parameter_buffer.ptr(), PyBUF_ANY_CONTIGUOUS);
-        size_t par_len = par_buf_wrapper.m_buf.len;
+        if (cooperative)
+        {
+          if (!PyTuple_Check(call_args.ptr())) {
+            throw pycuda::error("function::launch_kernel", CUDA_ERROR_INVALID_HANDLE,
+                "call_args must be a tuple in cooperative kernel launch");
+          }
+          py::tuple args_tuple = py::extract<py::tuple>(call_args);
 
-        void *config[] = {
-          CU_LAUNCH_PARAM_BUFFER_POINTER, const_cast<void *>(par_buf_wrapper.m_buf.buf),
-          CU_LAUNCH_PARAM_BUFFER_SIZE, &par_len,
-          CU_LAUNCH_PARAM_END
-        };
+          size_t num_args = py::len(args_tuple);
+          std::vector<void*> kernel_args(num_args);
+          std::vector<std::vector<char>> arg_buffers(num_args);
 
-        CUDAPP_CALL_GUARDED(
-            cuLaunchKernel, (m_function,
-              grid_dim[0], grid_dim[1], grid_dim[2],
-              block_dim[0], block_dim[1], block_dim[2],
-              shared_mem_bytes, s_handle, 0, config
+          for (size_t i = 0; i < num_args; ++i) {
+            py::object arg = args_tuple[i];
+
+            if (PyObject_HasAttrString(arg.ptr(), "gpudata")) {
+              py::object gpudata_obj = arg.attr("gpudata");
+              CUdeviceptr ptr = py::extract<CUdeviceptr>(gpudata_obj);
+              arg_buffers[i].resize(sizeof(CUdeviceptr));
+              memcpy(arg_buffers[i].data(), &ptr, sizeof(CUdeviceptr));
+              kernel_args[i] = arg_buffers[i].data();
+            } else if (PyLong_Check(arg.ptr())) {
+              long value = PyLong_AsLong(arg.ptr());
+              arg_buffers[i].resize(sizeof(long));
+              memcpy(arg_buffers[i].data(), &value, sizeof(long));
+              kernel_args[i] = arg_buffers[i].data();
+            } else if (PyFloat_Check(arg.ptr())) {
+              double value = PyFloat_AsDouble(arg.ptr());
+              arg_buffers[i].resize(sizeof(double));
+              memcpy(arg_buffers[i].data(), &value, sizeof(double));
+              kernel_args[i] = arg_buffers[i].data();
+            } else if (PyArray_CheckScalar(arg.ptr())) {
+              PyArray_Descr *descr = PyArray_DescrFromScalar(arg.ptr());
+              if (descr->type_num == NPY_UINT64) {
+                uint64_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(uint64_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(uint64_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_UINT32) {
+                uint32_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(uint32_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(uint32_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_UINT16) {
+                uint16_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(uint16_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(uint16_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_UINT8) {
+                uint8_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(uint8_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(uint8_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_INT64) {
+                int64_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(int64_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(int64_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_INT32) {
+                int32_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(int32_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(int32_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_INT16) {
+                int16_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(int16_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(int16_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_INT8) {
+                int8_t value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(int8_t));
+                memcpy(arg_buffers[i].data(), &value, sizeof(int8_t));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_FLOAT32) {
+                float value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(float));
+                memcpy(arg_buffers[i].data(), &value, sizeof(float));
+                kernel_args[i] = arg_buffers[i].data();
+              } else if (descr->type_num == NPY_FLOAT64) {
+                double value;
+                PyArray_ScalarAsCtype(arg.ptr(), &value);
+                arg_buffers[i].resize(sizeof(double));
+                memcpy(arg_buffers[i].data(), &value, sizeof(double));
+                kernel_args[i] = arg_buffers[i].data();
+              } else {
+                throw pycuda::error("function::launch_kernel", CUDA_ERROR_INVALID_HANDLE,
+                    "unsupported scalar argument type");
+              }
+            } else {
+              throw pycuda::error("function::launch_kernel", CUDA_ERROR_INVALID_HANDLE,
+                  "unsupported argument type");
+            }
+          }
+
+          CUDAPP_CALL_GUARDED(
+              cuLaunchCooperativeKernel, (m_function,
+                grid_dim[0], grid_dim[1], grid_dim[2],
+                block_dim[0], block_dim[1], block_dim[2],
+                shared_mem_bytes, s_handle, kernel_args.data()
               ));
+        }
+        else
+        {
+          py_buffer_wrapper par_buf_wrapper;
+          par_buf_wrapper.get(call_args.ptr(), PyBUF_ANY_CONTIGUOUS);
+          size_t par_len = par_buf_wrapper.m_buf.len;
+
+          void *config[] = {
+            CU_LAUNCH_PARAM_BUFFER_POINTER, const_cast<void *>(par_buf_wrapper.m_buf.buf),
+            CU_LAUNCH_PARAM_BUFFER_SIZE, &par_len,
+            CU_LAUNCH_PARAM_END
+          };
+
+          CUDAPP_CALL_GUARDED(
+              cuLaunchKernel, (m_function,
+                grid_dim[0], grid_dim[1], grid_dim[2],
+                block_dim[0], block_dim[1], block_dim[2],
+                shared_mem_bytes, s_handle, 0, config
+                ));
+        }
       }
 
 #endif

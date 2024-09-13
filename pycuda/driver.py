@@ -469,6 +469,7 @@ def _add_functionality():
         shared = kwargs.pop("shared", 0)
         texrefs = kwargs.pop("texrefs", [])
         time_kernel = kwargs.pop("time_kernel", False)
+        cooperative = kwargs.pop("cooperative", False)
 
         if kwargs:
             raise ValueError(
@@ -480,6 +481,7 @@ def _add_functionality():
 
         func._set_block_shape(*block)
         handlers, arg_buf = _build_arg_buf(args)
+        call_args = args if cooperative else arg_buf
 
         for handler in handlers:
             handler.pre_call(stream)
@@ -499,7 +501,7 @@ def _add_functionality():
 
                 start_time = time()
 
-            func._launch_kernel(grid, block, arg_buf, shared, None)
+            func._launch_kernel(grid, block, call_args, shared, None, cooperative)
 
             if post_handlers or time_kernel:
                 Context.synchronize()
@@ -516,7 +518,7 @@ def _add_functionality():
             assert (
                 not time_kernel
             ), "Can't time the kernel on an asynchronous invocation"
-            func._launch_kernel(grid, block, arg_buf, shared, stream)
+            func._launch_kernel(grid, block, call_args, shared, stream, cooperative)
 
             if post_handlers:
                 for handler in post_handlers:
@@ -557,6 +559,7 @@ def _add_functionality():
             args = (block,) + args
 
         shared_size = kwargs.pop("shared_size", 0)
+        cooperative = kwargs.pop("cooperative", False)
 
         if kwargs:
             raise TypeError(
@@ -566,14 +569,16 @@ def _add_functionality():
         from pycuda._pvt_struct import pack
 
         arg_buf = pack(func.arg_format, *args)
+        call_args = args if cooperative else arg_buf
 
         for texref in func.texrefs:
             func.param_set_texref(texref)
 
-        func._launch_kernel(grid, block, arg_buf, shared_size, None)
+        func._launch_kernel(grid, block, call_args, shared_size, None, cooperative)
 
     def function_prepared_timed_call(func, grid, block, *args, **kwargs):
         shared_size = kwargs.pop("shared_size", 0)
+        cooperative = kwargs.pop("cooperative", False)
         if kwargs:
             raise TypeError(
                 "unknown keyword arguments: " + ", ".join(kwargs.keys())
@@ -582,6 +587,7 @@ def _add_functionality():
         from pycuda._pvt_struct import pack
 
         arg_buf = pack(func.arg_format, *args)
+        call_args = args if cooperative else arg_buf
 
         for texref in func.texrefs:
             func.param_set_texref(texref)
@@ -590,7 +596,7 @@ def _add_functionality():
         end = Event()
 
         start.record()
-        func._launch_kernel(grid, block, arg_buf, shared_size, None)
+        func._launch_kernel(grid, block, call_args, shared_size, None, cooperative)
         end.record()
 
         def get_call_time():
@@ -615,6 +621,7 @@ def _add_functionality():
             stream = block
 
         shared_size = kwargs.pop("shared_size", 0)
+        cooperative = kwargs.pop("cooperative", False)
 
         if kwargs:
             raise TypeError(
@@ -624,11 +631,12 @@ def _add_functionality():
         from pycuda._pvt_struct import pack
 
         arg_buf = pack(func.arg_format, *args)
+        call_args = args if cooperative else arg_buf
 
         for texref in func.texrefs:
             func.param_set_texref(texref)
 
-        func._launch_kernel(grid, block, arg_buf, shared_size, stream)
+        func._launch_kernel(grid, block, call_args, shared_size, stream, cooperative)
 
     # }}}
 
