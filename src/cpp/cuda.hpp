@@ -1448,7 +1448,8 @@ namespace pycuda
 #if CUDAPP_CUDA_VERSION >= 4000
       void launch_kernel(py::tuple grid_dim_py, py::tuple block_dim_py,
           py::object parameter_buffer,
-          unsigned shared_mem_bytes, py::object stream_py)
+          unsigned shared_mem_bytes, py::object stream_py,
+          bool cooperative=false)
       {
         const unsigned axis_count = 3;
         unsigned grid_dim[axis_count];
@@ -1488,12 +1489,42 @@ namespace pycuda
           CU_LAUNCH_PARAM_END
         };
 
-        CUDAPP_CALL_GUARDED(
-            cuLaunchKernel, (m_function,
-              grid_dim[0], grid_dim[1], grid_dim[2],
-              block_dim[0], block_dim[1], block_dim[2],
-              shared_mem_bytes, s_handle, 0, config
-              ));
+        if (!cooperative)
+        {
+          CUDAPP_CALL_GUARDED(
+              cuLaunchKernel, (m_function,
+                grid_dim[0], grid_dim[1], grid_dim[2],
+                block_dim[0], block_dim[1], block_dim[2],
+                shared_mem_bytes, s_handle, 0, config
+                ));
+        }
+        else
+        {
+#if CUDAPP_CUDA_VERSION >= 12000
+          CUlaunchAttribute attrs[1];
+          attrs[0].id = CU_LAUNCH_ATTRIBUTE_COOPERATIVE;
+          attrs[0].value.cooperative = 1;
+
+          CUlaunchConfig cfg;
+          cfg.gridDimX = grid_dim[0];
+          cfg.gridDimY = grid_dim[1];
+          cfg.gridDimZ = grid_dim[2];
+          cfg.blockDimX = block_dim[0];
+          cfg.blockDimY = block_dim[1];
+          cfg.blockDimZ = block_dim[2];
+          cfg.sharedMemBytes = shared_mem_bytes;
+          cfg.hStream = s_handle;
+          cfg.attrs = attrs;
+          cfg.numAttrs = 1;
+
+          CUDAPP_CALL_GUARDED(cuLaunchKernelEx, (&cfg, m_function, 0, config));
+#else
+          throw pycuda::error("function::launch_kernel",
+              CUDA_ERROR_NOT_SUPPORTED,
+              "cooperative kernel launch requires CUDA >= 12.0 "
+              "(use a newer CUDA toolkit, or avoid cooperative=True).");
+#endif
+        }
       }
 
 #endif
