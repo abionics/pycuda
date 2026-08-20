@@ -197,37 +197,37 @@ def _add_functionality():
     def device___getattr__(dev, name):
         return dev.get_attribute(getattr(device_attribute, name.upper()))
 
-    def _build_arg_buf(args):
+    def _build_arg_buf(args, cooperative=False):
         handlers = []
 
         arg_data = []
-        format = ""
+        formats = []
         for i, arg in enumerate(args):
             if isinstance(arg, np.number):
                 arg_data.append(arg)
-                format += arg.dtype.char
+                formats.append(arg.dtype.char)
             elif isinstance(arg, (DeviceAllocation, PooledDeviceAllocation)):
                 arg_data.append(int(arg))
-                format += "P"
+                formats.append("P")
             elif isinstance(arg, ArgumentHandler):
                 handlers.append(arg)
                 arg_data.append(int(arg.get_device_alloc()))
-                format += "P"
+                formats.append("P")
             elif isinstance(arg, np.ndarray):
                 if isinstance(arg.base, ManagedAllocationOrStub):
                     arg_data.append(int(arg.base))
-                    format += "P"
+                    formats.append("P")
                 else:
                     arg_data.append(arg)
-                    format += "%ds" % arg.nbytes
+                    formats.append("%ds" % arg.nbytes)
             elif isinstance(arg, np.void):
                 arg_data.append(_my_bytes(_memoryview(arg)))
-                format += "%ds" % arg.itemsize
+                formats.append("%ds" % arg.itemsize)
             else:
                 cai = getattr(arg, "__cuda_array_interface__", None)
                 if cai:
                     arg_data.append(cai["data"][0])
-                    format += "P"
+                    formats.append("P")
                     continue
 
                 try:
@@ -237,11 +237,16 @@ def _add_functionality():
                 else:
                     # for gpuarrays
                     arg_data.append(int(gpudata))
-                    format += "P"
+                    formats.append("P")
 
         from pycuda._pvt_struct import pack
 
-        return handlers, pack(format, *arg_data)
+        if cooperative:
+            return handlers, [
+                pack(formats[i], arg) for i, arg in enumerate(arg_data)
+            ]
+
+        return handlers, pack("".join(formats), *arg_data)
 
     # {{{ pre-CUDA 4 call interface (stateful)
 
@@ -492,7 +497,7 @@ def _add_functionality():
             raise ValueError("must specify block size")
 
         func._set_block_shape(*block)
-        handlers, arg_buf = _build_arg_buf(args)
+        handlers, arg_buf = _build_arg_buf(args, cooperative)
 
         for handler in handlers:
             handler.pre_call(stream)
@@ -540,22 +545,40 @@ def _add_functionality():
             texrefs = []
         func.texrefs = texrefs
 
-        func.arg_format = ""
+        func.arg_formats = []
 
         for _i, arg_type in enumerate(arg_types):
             if isinstance(arg_type, type) and np.number in arg_type.__mro__:
-                func.arg_format += np.dtype(arg_type).char
+                arg_format = np.dtype(arg_type).char
             elif isinstance(arg_type, np.dtype):
                 if arg_type.char == "V":
-                    func.arg_format += "%ds" % arg_type.itemsize
+                    arg_format = "%ds" % arg_type.itemsize
                 else:
-                    func.arg_format += arg_type.char
+                    arg_format = arg_type.char
             elif isinstance(arg_type, str):
-                func.arg_format += arg_type
+                arg_format = arg_type
             else:
-                func.arg_format += np.dtype(np.uintp).char
+                arg_format = np.dtype(np.uintp).char
+
+            func.arg_formats.append(arg_format)
+
+        func.arg_format = "".join(func.arg_formats)
 
         return func
+
+    def _build_prepared_arg_buf(func, args, cooperative):
+        from pycuda._pvt_struct import pack
+
+        if not cooperative:
+            return pack(func.arg_format, *args)
+
+        if len(args) != len(func.arg_formats):
+            raise TypeError(
+                "expected %d kernel arguments, got %d"
+                % (len(func.arg_formats), len(args))
+            )
+
+        return [pack(func.arg_formats[i], arg) for i, arg in enumerate(args)]
 
     def function_prepared_call(func, grid, block, *args, **kwargs):
         if isinstance(block, tuple):
@@ -579,9 +602,7 @@ def _add_functionality():
                 "unknown keyword arguments: " + ", ".join(kwargs.keys())
             )
 
-        from pycuda._pvt_struct import pack
-
-        arg_buf = pack(func.arg_format, *args)
+        arg_buf = _build_prepared_arg_buf(func, args, cooperative)
 
         for texref in func.texrefs:
             func.param_set_texref(texref)
@@ -596,9 +617,7 @@ def _add_functionality():
                 "unknown keyword arguments: " + ", ".join(kwargs.keys())
             )
 
-        from pycuda._pvt_struct import pack
-
-        arg_buf = pack(func.arg_format, *args)
+        arg_buf = _build_prepared_arg_buf(func, args, cooperative)
 
         for texref in func.texrefs:
             func.param_set_texref(texref)
@@ -639,9 +658,7 @@ def _add_functionality():
                 "unknown keyword arguments: " + ", ".join(kwargs.keys())
             )
 
-        from pycuda._pvt_struct import pack
-
-        arg_buf = pack(func.arg_format, *args)
+        arg_buf = _build_prepared_arg_buf(func, args, cooperative)
 
         for texref in func.texrefs:
             func.param_set_texref(texref)

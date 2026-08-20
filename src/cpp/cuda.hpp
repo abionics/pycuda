@@ -1445,6 +1445,18 @@ namespace pycuda
       }
 #endif
 
+#if CUDAPP_CUDA_VERSION >= 9000
+      int get_max_active_blocks_per_multiprocessor(
+          int block_size, size_t dynamic_smem_size=0) const
+      {
+        int result;
+        CUDAPP_CALL_GUARDED_WITH_TRACE_INFO(
+            cuOccupancyMaxActiveBlocksPerMultiprocessor,
+            (&result, m_function, block_size, dynamic_smem_size), m_symbol);
+        return result;
+      }
+#endif
+
 #if CUDAPP_CUDA_VERSION >= 4000
       void launch_kernel(py::tuple grid_dim_py, py::tuple block_dim_py,
           py::object parameter_buffer,
@@ -1479,18 +1491,19 @@ namespace pycuda
 
         PYCUDA_PARSE_STREAM_PY;
 
-        py_buffer_wrapper par_buf_wrapper;
-        par_buf_wrapper.get(parameter_buffer.ptr(), PyBUF_ANY_CONTIGUOUS);
-        size_t par_len = par_buf_wrapper.m_buf.len;
-
-        void *config[] = {
-          CU_LAUNCH_PARAM_BUFFER_POINTER, const_cast<void *>(par_buf_wrapper.m_buf.buf),
-          CU_LAUNCH_PARAM_BUFFER_SIZE, &par_len,
-          CU_LAUNCH_PARAM_END
-        };
-
         if (!cooperative)
         {
+          py_buffer_wrapper par_buf_wrapper;
+          par_buf_wrapper.get(parameter_buffer.ptr(), PyBUF_ANY_CONTIGUOUS);
+          size_t par_len = par_buf_wrapper.m_buf.len;
+
+          void *config[] = {
+            CU_LAUNCH_PARAM_BUFFER_POINTER,
+                const_cast<void *>(par_buf_wrapper.m_buf.buf),
+            CU_LAUNCH_PARAM_BUFFER_SIZE, &par_len,
+            CU_LAUNCH_PARAM_END
+          };
+
           CUDAPP_CALL_GUARDED(
               cuLaunchKernel, (m_function,
                 grid_dim[0], grid_dim[1], grid_dim[2],
@@ -1500,28 +1513,37 @@ namespace pycuda
         }
         else
         {
-#if CUDAPP_CUDA_VERSION >= 12000
-          CUlaunchAttribute attrs[1];
-          attrs[0].id = CU_LAUNCH_ATTRIBUTE_COOPERATIVE;
-          attrs[0].value.cooperative = 1;
+#if CUDAPP_CUDA_VERSION >= 9000
+          pycuda_size_t param_count = py::len(parameter_buffer);
+          std::vector<std::unique_ptr<py_buffer_wrapper> > param_wrappers;
+          std::vector<void *> kernel_params;
+          param_wrappers.reserve(param_count);
+          kernel_params.reserve(param_count);
 
-          CUlaunchConfig cfg;
-          cfg.gridDimX = grid_dim[0];
-          cfg.gridDimY = grid_dim[1];
-          cfg.gridDimZ = grid_dim[2];
-          cfg.blockDimX = block_dim[0];
-          cfg.blockDimY = block_dim[1];
-          cfg.blockDimZ = block_dim[2];
-          cfg.sharedMemBytes = shared_mem_bytes;
-          cfg.hStream = s_handle;
-          cfg.attrs = attrs;
-          cfg.numAttrs = 1;
+          for (pycuda_size_t i = 0; i < param_count; ++i)
+          {
+            py::object param = parameter_buffer[i];
+            param_wrappers.push_back(
+                std::unique_ptr<py_buffer_wrapper>(new py_buffer_wrapper()));
+            param_wrappers.back()->get(param.ptr(), PyBUF_ANY_CONTIGUOUS);
+            kernel_params.push_back(param_wrappers.back()->m_buf.buf);
+          }
 
-          CUDAPP_CALL_GUARDED(cuLaunchKernelEx, (&cfg, m_function, 0, config));
+          CUDAPP_CALL_GUARDED(
+              cuLaunchCooperativeKernel, (m_function,
+                grid_dim[0], grid_dim[1], grid_dim[2],
+                block_dim[0], block_dim[1], block_dim[2],
+                shared_mem_bytes, s_handle,
+                kernel_params.empty() ? 0 : &kernel_params.front()
+                ));
 #else
           throw pycuda::error("function::launch_kernel",
+#if CUDAPP_CUDA_VERSION >= 5000
               CUDA_ERROR_NOT_SUPPORTED,
-              "cooperative kernel launch requires CUDA >= 12.0 "
+#else
+              CUDA_ERROR_INVALID_VALUE,
+#endif
+              "cooperative kernel launch requires CUDA >= 9.0 "
               "(use a newer CUDA toolkit, or avoid cooperative=True).");
 #endif
         }
